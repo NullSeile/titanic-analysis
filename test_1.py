@@ -75,16 +75,14 @@ df.loc[embarked == 'S', "Embarked_S"] = 1
 # Set sex from categorical to numerical [-1, 1]
 df['Sex'] = sex.map({'female': 1, 'male': -1})
 
-# print(df.head())
-# print(df.describe())
-# exit()
-
 # Remove outliers
 for col in ["Age", "TicketFare", "Fare"]:
     val = df[col].mean() + 3 * df[col].std()
     df.loc[df[col] > val, col] = val
 
-# show_histograms(df)
+df = z_score_all_but_target(df)
+df = df.dropna()
+
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -98,114 +96,212 @@ from sklearn.metrics import (
     f1_score,
     classification_report,
     PrecisionRecallDisplay,
+    precision_recall_curve,
     roc_curve,
 )
 
-# from sklearn.model_selection import train_test_split
+from sklearn.metrics import auc
 
-models = {
-    "Logistic Regression": lambda: LogisticRegression(max_iter=1000),
-    "Logistic Regression L2 1": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=1),
-    "Logistic Regression L2 0.1": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=0.1),
-    "Logistic Regression L2 0.01": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=0.01),
-    "Random Forest": lambda: RandomForestClassifier(n_estimators=100, criterion='gini'),
-    "KNN": lambda: KNeighborsClassifier(n_neighbors=5),
-    "SVM linear": lambda: SVC(kernel='linear', C=1),
-    "SVM rbf": lambda: SVC(kernel='rbf', C=1)
+# Cross validation
+from sklearn.model_selection import GridSearchCV
+
+parameter_grids = {
+    'Logistic Regression': (
+        LogisticRegression(max_iter=1000), {
+            'C': [1, 5, 10, 15, 20],
+            'penalty': ['l2'],
+        }
+    ),
+    # 'Random Forest': (
+    #     RandomForestClassifier(), {
+    #         'n_estimators': [600, 650, 700, 750, 800],
+    #         'criterion': ['gini', 'entropy'],
+    #     }
+    # ),
+    'KNN': (
+        KNeighborsClassifier(), {
+            'n_neighbors': [10, 11, 15, 20],
+        }
+    ),
+    'SVM': (
+        SVC(probability=True), {
+            'C': [0.01, 0.1, 0.5, 1, 2, 3, 5],
+            'kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
+        }
+    ),
 }
 
-metrics = {
-    "Accuracy ": accuracy_score,
-    "Precision": average_precision_score,
-    "Recall   ": recall_score,
-    "F1 Score ": f1_score,
-    # "Classification Report": classification_report
-}
 
-n = 100
-model_metrics = {}
-for model_name, make_model in models.items():
-    train_scores = {metric: 0 for metric in metrics}
-    val_scores = {metric: 0 for metric in metrics}
+# Draw ROC and Precision-Recall curves for each model side-by-side
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+ax_roc, ax_pr = axes
 
-    for i in range(n):
-            
-        # Maybe do shuffle here
-        # df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-        df = df.sample(frac=1).reset_index(drop=True)
-        df = df.dropna()
+# Prepare features and target once
+X, y = split_X_y(df)
 
-        # Standardize scores
-        df = z_score_all_but_target(df)
-        df = df.dropna()
+models = {}
+for model_name, (model, param_grid) in parameter_grids.items():
+    grid_search = GridSearchCV(model, param_grid, refit=True, n_jobs=-1, cv=5, scoring='accuracy', verbose=1)
+    grid_search.fit(X, y)
 
-        # Split train and validation sets (80% train, 20% validation)
-        num_train = int(0.8 * len(df))
-        df_train = df.iloc[:num_train]
-        df_val = df.iloc[num_train:]
+    models[model_name] = grid_search
 
-        X_train, y_train = split_X_y(df_train)
-        X_val, y_val = split_X_y(df_val)
+    # Generate roc curve
+    y_scores = grid_search.predict_proba(X)[:, 1]
+    fpr, tpr, thresholds = roc_curve(y, y_scores)
+    ax_roc.plot(fpr, tpr, label=f'{model_name} (AUC = {auc(fpr, tpr):.2f})')
 
-        # Standardize scores
-        # X_train = z_score_norm(X_train)
-        # X_val = z_score_norm(X_val)
-
-        # model = LogisticRegression(max_iter=1000)
-        model = make_model()
-        model.fit(X_train, y_train)
-
-        y_train_pred = model.predict(X_train)
-        y_val_pred = model.predict(X_val)
-
-        for metric_name, metric_func in metrics.items():
-            train_scores[metric_name] += metric_func(y_train, y_train_pred)
-            val_scores[metric_name] += metric_func(y_val, y_val_pred)
+    # Generate precision-recall curve
+    precision, recall, _ = precision_recall_curve(y, y_scores)
+    ap = average_precision_score(y, y_scores)
+    ax_pr.plot(recall, precision, label=f'{model_name} (AP = {ap:.2f})')
 
 
-        model_metrics[model_name] = (train_scores, val_scores)
+    print(model_name)
+    print(f"Best parameters: {grid_search.best_params_}")
+    print(f"Best cross-validation accuracy: {grid_search.best_score_:.5f}")
+    print()
 
-    print(f"{model_name}")
-    for metric_name in metrics:
-        print(f"  {metric_name}: {train_scores[metric_name] / n:.5f} (Train), {val_scores[metric_name] / n:.5f} (Validation)")
+pos_rate = y.mean()
 
-    # PRECISIO-RECALL CURVE
 
-    # pr_precision, pr_recall = precision_recall_curve(y_test, PREDICTIONS)
-    # disp = PrecisionRecallDisplay(precision = pr_precision, recall = pr_recall)
-    # disp.plot()
-    # plt.show()
-    
-    # ROC CURVE
-    
-    # false_positives, true_positives = roc_curve(y_test, )
-    
+# ROC subplot formatting
+ax_roc.plot([0, 1], [0, 1], 'k--', linewidth=1)  # Diagonal line
+ax_roc.set_xlabel('False Positive Rate')
+ax_roc.set_ylabel('True Positive Rate')
+ax_roc.set_title('ROC Curve')
+ax_roc.legend()
 
-# Plot the metrics in a single plot without line
-plt.figure(figsize=(12, 8))
-for model_name, (train_scores, val_scores) in model_metrics.items():
-    plt.plot(
-        list(metrics.keys())[:-1],
-        [val_scores[metric_name] / n for metric_name in list(metrics.keys())[:-1]],
-        marker='o',
-        # linestyle='None',
-        label=model_name
-    )
-plt.title('Model Performance Comparison')
-plt.legend()
+# Precision-Recall subplot formatting
+ax_pr.hlines(pos_rate, xmin=0, xmax=1, colors='k', linestyles='--', linewidth=1, label=f'Baseline (pos rate={pos_rate:.2f})')
+ax_pr.set_xlabel('Recall')
+ax_pr.set_ylabel('Precision')
+ax_pr.set_title('Precision-Recall Curve')
+ax_pr.legend()
+
+plt.tight_layout()
 plt.show()
 
-# model_coef = pd.Series(model.coef_[0], index=X_train.columns)
-# model_coef = model_coef.sort_values(ascending=False, key=abs)
-# print("Model coefficients:")
-# print(model_coef)
+# Print feature importances for models that have it available (feature importance or coefficients)
+for model_name, model in models.items():
+    if hasattr(model.best_estimator_, 'feature_importances_'):
+        importances = model.best_estimator_.feature_importances_
+        feature_names = X.columns
+        feature_importances = pd.Series(importances, index=feature_names).sort_values(ascending=False)
+        print(f"Feature importances for {model_name}:")
+        print(feature_importances)
+        print()
+    elif hasattr(model.best_estimator_, 'coef_'):
+        coefs = model.best_estimator_.coef_[0]
+        feature_names = X.columns
+        feature_coefs = pd.Series(coefs, index=feature_names).sort_values(ascending=False, key=abs)
+        print(f"Feature coefficients for {model_name}:")
+        print(feature_coefs)
+exit()
 
-# Plot the absolute values of the coefficients, but color them red if negative and green if positive
-# plt.figure(figsize=(10, 6))
-# colors = model_coef.apply(lambda x: 'red' if x < 0 else 'green').tolist()
-# model_coef.abs().plot(kind='bar', color=colors)
-# plt.title('Absolute Values of Model Coefficients')
-# plt.xlabel('Features')
-# plt.ylabel('Absolute Coefficient Value')
-# plt.tight_layout()
+# models = {
+#     "Logistic Regression": lambda: LogisticRegression(max_iter=1000),
+#     "Logistic Regression L2 1": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=1),
+#     "Logistic Regression L2 0.1": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=0.1),
+#     "Logistic Regression L2 0.01": lambda: LogisticRegression(max_iter=1000, penalty='l2', C=0.01),
+#     "Random Forest": lambda: RandomForestClassifier(n_estimators=100, criterion='gini'),
+#     "KNN": lambda: KNeighborsClassifier(n_neighbors=5),
+#     "SVM linear": lambda: SVC(kernel='linear', C=1),
+#     "SVM rbf": lambda: SVC(kernel='rbf', C=1)
+# }
+
+# metrics = {
+#     "Accuracy ": accuracy_score,
+#     "Precision": average_precision_score,
+#     "Recall   ": recall_score,
+#     "F1 Score ": f1_score,
+#     # "Classification Report": classification_report
+# }
+
+# n = 100
+# model_metrics = {}
+# for model_name, make_model in models.items():
+#     train_scores = {metric: 0 for metric in metrics}
+#     val_scores = {metric: 0 for metric in metrics}
+
+#     for i in range(n):
+            
+#         # Maybe do shuffle here
+#         # df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+#         df = df.sample(frac=1).reset_index(drop=True)
+#         df = df.dropna()
+
+#         # Standardize scores
+#         # df = z_score_all_but_target(df)
+#         df = df.dropna()
+
+#         # Split train and validation sets (80% train, 20% validation)
+#         num_train = int(0.8 * len(df))
+#         df_train = df.iloc[:num_train]
+#         df_val = df.iloc[num_train:]
+
+#         X_train, y_train = split_X_y(df_train)
+#         X_val, y_val = split_X_y(df_val)
+
+#         # Standardize scores
+#         # X_train = z_score_norm(X_train)
+#         # X_val = z_score_norm(X_val)
+
+#         # model = LogisticRegression(max_iter=1000)
+#         model = make_model()
+#         model.fit(X_train, y_train)
+
+#         y_train_pred = model.predict(X_train)
+#         y_val_pred = model.predict(X_val)
+
+#         for metric_name, metric_func in metrics.items():
+#             train_scores[metric_name] += metric_func(y_train, y_train_pred)
+#             val_scores[metric_name] += metric_func(y_val, y_val_pred)
+
+
+#         model_metrics[model_name] = (train_scores, val_scores)
+
+#     print(f"{model_name}")
+#     for metric_name in metrics:
+#         print(f"  {metric_name}: {train_scores[metric_name] / n:.5f} (Train), {val_scores[metric_name] / n:.5f} (Validation)")
+
+#     # PRECISIO-RECALL CURVE
+
+#     # pr_precision, pr_recall = precision_recall_curve(y_test, PREDICTIONS)
+#     # disp = PrecisionRecallDisplay(precision = pr_precision, recall = pr_recall)
+#     # disp.plot()
+#     # plt.show()
+    
+#     # ROC CURVE
+    
+#     # false_positives, true_positives = roc_curve(y_test, )
+    
+
+# # Plot the metrics in a single plot without line
+# plt.figure(figsize=(12, 8))
+# for model_name, (train_scores, val_scores) in model_metrics.items():
+#     plt.plot(
+#         list(metrics.keys())[:-1],
+#         [val_scores[metric_name] / n for metric_name in list(metrics.keys())[:-1]],
+#         marker='o',
+#         # linestyle='None',
+#         label=model_name
+#     )
+# plt.title('Model Performance Comparison')
+# plt.legend()
 # plt.show()
+
+# # model_coef = pd.Series(model.coef_[0], index=X_train.columns)
+# # model_coef = model_coef.sort_values(ascending=False, key=abs)
+# # print("Model coefficients:")
+# # print(model_coef)
+
+# # Plot the absolute values of the coefficients, but color them red if negative and green if positive
+# # plt.figure(figsize=(10, 6))
+# # colors = model_coef.apply(lambda x: 'red' if x < 0 else 'green').tolist()
+# # model_coef.abs().plot(kind='bar', color=colors)
+# # plt.title('Absolute Values of Model Coefficients')
+# # plt.xlabel('Features')
+# # plt.ylabel('Absolute Coefficient Value')
+# # plt.tight_layout()
+# # plt.show()
